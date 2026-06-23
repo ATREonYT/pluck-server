@@ -137,7 +137,7 @@ function resetPage(token) {
   <style>body{margin:0;background:#F4F6FB;font-family:${FONT};color:#1d2433}.card{max-width:420px;margin:8vh auto;background:#fff;border:1px solid #E7EBF3;border-radius:20px;overflow:hidden}.hd{background:linear-gradient(135deg,#FFD15C,#FF6F4E);padding:20px 24px;color:#fff;font-weight:800;font-size:22px;letter-spacing:.5px}.bd{padding:24px}input{width:100%;box-sizing:border-box;padding:13px 14px;border:1px solid #D8DEEA;border-radius:12px;font-size:16px;margin-bottom:12px}button{width:100%;padding:14px;border:0;border-radius:12px;background:linear-gradient(135deg,#FFD15C,#FF6F4E);color:#1d2433;font-weight:800;font-size:16px;cursor:pointer}.msg{margin-top:14px;font-weight:700;text-align:center;min-height:20px}h1{font-size:20px;margin:0 0 6px}p{color:#5b6478;font-size:14px;margin:0 0 18px}</style></head>
   <body><div class="card"><div class="hd">PLUCK</div><div class="bd">
   <h1>Choose a new password</h1><p>Enter a new password for your account.</p>
-  <input id="p1" type="password" placeholder="New password (6+ chars)"/>
+  <input id="p1" type="password" placeholder="New password (8+ chars)"/>
   <input id="p2" type="password" placeholder="Confirm new password"/>
   <button id="go">Reset password</button>
   <div class="msg" id="m"></div>
@@ -146,7 +146,7 @@ function resetPage(token) {
   var TK=${JSON.stringify(token)};var m=document.getElementById('m');
   document.getElementById('go').onclick=function(){
     var a=document.getElementById('p1').value,b=document.getElementById('p2').value;
-    if(a.length<6){m.style.color='#FF6F4E';m.textContent='Password must be at least 6 characters.';return;}
+    if(a.length<8){m.style.color='#FF6F4E';m.textContent='Password must be at least 8 characters.';return;}
     if(a!==b){m.style.color='#FF6F4E';m.textContent='Passwords do not match.';return;}
     m.style.color='#5b6478';m.textContent='Saving…';
     fetch('/api/auth/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TK,password:a})})
@@ -237,7 +237,7 @@ const server = http.createServer(async (req, res) => {
     if (route === "POST /api/auth/signup") {
       const { email, password, deviceId } = await readBody(req);
       if (!email || !password) return send(res, 400, { error: "Email and password required." }, origin);
-      if (String(password).length < 6) return send(res, 400, { error: "Password must be at least 6 characters." }, origin);
+      if (String(password).length < 8) return send(res, 400, { error: "Password must be at least 8 characters." }, origin);
       if (userByEmail(email)) return send(res, 409, { error: "That email already has an account." }, origin);
       const u = createUser({ email, pw: password });
       u.devices = deviceId ? [deviceId] : [];
@@ -297,7 +297,7 @@ const server = http.createServer(async (req, res) => {
       const { token, password } = await readBody(req);
       const rec = token && db.resets[token];
       if (!rec || rec.exp < Date.now()) { if (rec) { delete db.resets[token]; persist(); } return send(res, 400, { error: "This reset link is invalid or has expired." }, origin); }
-      if (!password || String(password).length < 6) return send(res, 400, { error: "Password must be at least 6 characters." }, origin);
+      if (!password || String(password).length < 8) return send(res, 400, { error: "Password must be at least 8 characters." }, origin);
       const u = db.users[rec.uid];
       if (!u) { delete db.resets[token]; persist(); return send(res, 400, { error: "Account not found." }, origin); }
       u.hash = hashPw(password);
