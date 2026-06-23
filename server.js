@@ -6,6 +6,8 @@ import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = process.env.PORT || 8787;
 const JWT_SECRET = process.env.JWT_SECRET || "dev-insecure-secret-change-me";
@@ -15,11 +17,17 @@ const ALLOWED = (process.env.ALLOWED_ORIGINS || "*").split(",").map((s) => s.tri
 const RC_AUTH = process.env.REVENUECAT_WEBHOOK_AUTH || "";
 const DATA_FILE = process.env.DATA_FILE || path.join(process.cwd(), "data.json");
 const YEAR = 60 * 60 * 24 * 365;
+const BREVO_API_KEY = process.env.BREVO_API_KEY || "";
+const BREVO_SENDER = process.env.BREVO_SENDER || "";   // the verified "work email" Brevo sends from
+const APP_NAME = process.env.APP_NAME || "Pluck";
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";     // protects the broadcast endpoint
+const PUBLIC_URL = process.env.APP_PUBLIC_URL || "";   // optional; otherwise derived from the request
 
 /* ---------------- tiny JSON-file store ---------------- */
-let db = { users: {}, byEmail: {}, byApple: {} };
+let db = { users: {}, byEmail: {}, byApple: {}, resets: {} };
 try { if (fs.existsSync(DATA_FILE)) db = JSON.parse(fs.readFileSync(DATA_FILE, "utf8")); }
 catch (e) { console.error("data load failed:", e.message); }
+db.users ||= {}; db.byEmail ||= {}; db.byApple ||= {}; db.resets ||= {};
 let saveTimer = null;
 function persist() {
   clearTimeout(saveTimer);
@@ -87,6 +95,68 @@ const userByEmail = (e) => (e && db.byEmail[e.toLowerCase()]) ? db.users[db.byEm
 const userByApple = (s) => db.byApple[s] ? db.users[db.byApple[s]] : null;
 const publicUser = (u) => ({ token: signToken(u.id), email: u.email, pro: !!u.pro });
 
+/* ---------------- email (Brevo) ---------------- */
+const FONT = "system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif";
+function emailLayout(heading, bodyHtml) {
+  return `<div style="background:#F4F6FB;padding:28px 0;font-family:${FONT}">
+  <div style="max-width:480px;margin:0 auto;background:#fff;border-radius:18px;overflow:hidden;border:1px solid #E7EBF3">
+    <div style="background:linear-gradient(135deg,#FFD15C,#FF6F4E);padding:22px 24px">
+      <span style="font-size:22px;font-weight:800;color:#fff;letter-spacing:.5px">PLUCK</span>
+    </div>
+    <div style="padding:26px 24px;color:#1d2433;font-size:15px;line-height:1.55">
+      <h1 style="margin:0 0 12px;font-size:20px;color:#12172a">${heading}</h1>
+      ${bodyHtml}
+    </div>
+    <div style="padding:16px 24px;color:#8a93a6;font-size:12px;border-top:1px solid #EEF1F7">
+      You're receiving this because you have a ${APP_NAME} account.
+    </div>
+  </div></div>`;
+}
+const emailButton = (href, label) =>
+  `<a href="${href}" style="display:inline-block;margin:18px 0;background:linear-gradient(135deg,#FFD15C,#FF6F4E);color:#1d2433;font-weight:800;text-decoration:none;padding:13px 26px;border-radius:12px">${label}</a>`;
+async function sendEmail(to, subject, html) {
+  if (!BREVO_API_KEY || !BREVO_SENDER) { console.log("[email skipped — not configured] to:", to, "| subject:", subject); return false; }
+  try {
+    const r = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: { "api-key": BREVO_API_KEY, "content-type": "application/json", "accept": "application/json" },
+      body: JSON.stringify({ sender: { name: APP_NAME, email: BREVO_SENDER }, to: [{ email: to }], subject, htmlContent: html }),
+    });
+    if (!r.ok) { console.error("email send failed:", r.status, await r.text().catch(() => "")); return false; }
+    return true;
+  } catch (e) { console.error("email error:", e.message); return false; }
+}
+function baseUrl(req) {
+  if (PUBLIC_URL) return PUBLIC_URL.replace(/\/$/, "");
+  const proto = (req.headers["x-forwarded-proto"] || "https").split(",")[0];
+  const host = req.headers["x-forwarded-host"] || req.headers["host"] || "localhost";
+  return proto + "://" + host;
+}
+function resetPage(token) {
+  return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Reset your Pluck password</title>
+  <style>body{margin:0;background:#F4F6FB;font-family:${FONT};color:#1d2433}.card{max-width:420px;margin:8vh auto;background:#fff;border:1px solid #E7EBF3;border-radius:20px;overflow:hidden}.hd{background:linear-gradient(135deg,#FFD15C,#FF6F4E);padding:20px 24px;color:#fff;font-weight:800;font-size:22px;letter-spacing:.5px}.bd{padding:24px}input{width:100%;box-sizing:border-box;padding:13px 14px;border:1px solid #D8DEEA;border-radius:12px;font-size:16px;margin-bottom:12px}button{width:100%;padding:14px;border:0;border-radius:12px;background:linear-gradient(135deg,#FFD15C,#FF6F4E);color:#1d2433;font-weight:800;font-size:16px;cursor:pointer}.msg{margin-top:14px;font-weight:700;text-align:center;min-height:20px}h1{font-size:20px;margin:0 0 6px}p{color:#5b6478;font-size:14px;margin:0 0 18px}</style></head>
+  <body><div class="card"><div class="hd">PLUCK</div><div class="bd">
+  <h1>Choose a new password</h1><p>Enter a new password for your account.</p>
+  <input id="p1" type="password" placeholder="New password (6+ chars)"/>
+  <input id="p2" type="password" placeholder="Confirm new password"/>
+  <button id="go">Reset password</button>
+  <div class="msg" id="m"></div>
+  </div></div>
+  <script>
+  var TK=${JSON.stringify(token)};var m=document.getElementById('m');
+  document.getElementById('go').onclick=function(){
+    var a=document.getElementById('p1').value,b=document.getElementById('p2').value;
+    if(a.length<6){m.style.color='#FF6F4E';m.textContent='Password must be at least 6 characters.';return;}
+    if(a!==b){m.style.color='#FF6F4E';m.textContent='Passwords do not match.';return;}
+    m.style.color='#5b6478';m.textContent='Saving…';
+    fetch('/api/auth/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TK,password:a})})
+      .then(function(r){return r.json().then(function(j){return{s:r.status,j:j};});})
+      .then(function(x){if(x.s===200){m.style.color='#1aa251';m.textContent='✓ Password reset! Open the Pluck app and sign in with your new password.';document.getElementById('go').disabled=true;}else{m.style.color='#FF6F4E';m.textContent=(x.j&&x.j.error)||'Something went wrong.';}})
+      .catch(function(){m.style.color='#FF6F4E';m.textContent='Network error. Try again.';});
+  };
+  </script></body></html>`;
+}
+
 /* ---------------- Sign in with Apple verify (RS256 vs Apple JWKS) ---------------- */
 let appleKeys = null, appleKeysAt = 0;
 async function appleJWKS() {
@@ -153,6 +223,11 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "OPTIONS") { res.writeHead(204, corsHeaders(origin)); return res.end(); }
   if (route === "GET /health" || route === "GET /") return send(res, 200, { ok: true, service: "pluck" }, origin);
+  if (route === "GET /privacy" || route === "GET /terms") {
+    const file = path.join(__dirname, route === "GET /privacy" ? "privacy.html" : "terms.html");
+    try { const html = fs.readFileSync(file, "utf8"); res.writeHead(200, corsHeaders(origin, { "Content-Type": "text/html; charset=utf-8" })); return res.end(html); }
+    catch (e) { return send(res, 404, { error: "Not found" }, origin); }
+  }
 
   const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "x").split(",")[0];
   if (limited(ip)) return send(res, 429, { error: "Slow down a moment." }, origin);
@@ -160,16 +235,32 @@ const server = http.createServer(async (req, res) => {
   try {
     /* ----- auth ----- */
     if (route === "POST /api/auth/signup") {
-      const { email, password } = await readBody(req);
+      const { email, password, deviceId } = await readBody(req);
       if (!email || !password) return send(res, 400, { error: "Email and password required." }, origin);
       if (String(password).length < 6) return send(res, 400, { error: "Password must be at least 6 characters." }, origin);
       if (userByEmail(email)) return send(res, 409, { error: "That email already has an account." }, origin);
-      return send(res, 200, publicUser(createUser({ email, pw: password })), origin);
+      const u = createUser({ email, pw: password });
+      u.devices = deviceId ? [deviceId] : [];
+      persist();
+      sendEmail(u.email, "Welcome to Pluck 🎉", emailLayout("Welcome to Pluck!",
+        `<p>Your account is all set. Time to pluck up the courage and practice the conversations that matter — interviews, dates, raises, tough talks and more.</p><p>Your progress now syncs to every device you sign in on.</p>`)).catch(() => {});
+      return send(res, 200, publicUser(u), origin);
     }
     if (route === "POST /api/auth/login") {
-      const { email, password } = await readBody(req);
+      const { email, password, deviceId } = await readBody(req);
       const u = userByEmail(email);
       if (!u || !verifyPw(password, u.hash)) return send(res, 401, { error: "Wrong email or password." }, origin);
+      const dev = deviceId;
+      if (dev) {
+        if (!Array.isArray(u.devices)) u.devices = [];
+        if (u.devices.length && !u.devices.includes(dev)) {
+          const when = new Date().toUTCString();
+          const ua = req.headers["user-agent"] || "an unknown device";
+          sendEmail(u.email, "New sign-in to your Pluck account", emailLayout("New sign-in detected",
+            `<p>Your Pluck account was just signed in on a new device.</p><p style="color:#5b6478;font-size:13px">When: ${when}<br>Device: ${ua}</p><p>If this was you, no action needed. If it wasn't, reset your password right away from the app's sign-in screen.</p>`)).catch(() => {});
+        }
+        if (!u.devices.includes(dev)) { u.devices.push(dev); persist(); }
+      }
       return send(res, 200, publicUser(u), origin);
     }
     if (route === "POST /api/auth/apple") {
@@ -181,6 +272,51 @@ const server = http.createServer(async (req, res) => {
       if (!u && info.email) { const be = userByEmail(info.email); if (be) { be.appleSub = info.sub; db.byApple[info.sub] = be.id; persist(); u = be; } }
       if (!u) u = createUser({ email: info.email, appleSub: info.sub });
       return send(res, 200, publicUser(u), origin);
+    }
+
+    /* ----- password reset ----- */
+    if (route === "POST /api/auth/forgot") {
+      const { email } = await readBody(req);
+      const u = userByEmail(email);
+      if (u && u.email) {
+        const tok = crypto.randomBytes(24).toString("hex");
+        db.resets[tok] = { uid: u.id, exp: Date.now() + 30 * 60 * 1000 };
+        persist();
+        const link = baseUrl(req) + "/reset?token=" + tok;
+        await sendEmail(u.email, "Reset your Pluck password", emailLayout("Reset your password",
+          `<p>We got a request to reset your Pluck password. Tap the button below to choose a new one — this link expires in 30 minutes.</p>${emailButton(link, "Reset password")}<p style="color:#8a93a6;font-size:12px">If the button doesn't work, paste this into your browser:<br>${link}</p><p style="color:#8a93a6;font-size:12px">Didn't request this? You can safely ignore this email; your password won't change.</p>`));
+      }
+      // Always succeed — never reveal whether an email is registered.
+      return send(res, 200, { ok: true }, origin);
+    }
+    if (route === "GET /reset") {
+      res.writeHead(200, corsHeaders(origin, { "Content-Type": "text/html; charset=utf-8" }));
+      return res.end(resetPage(url.searchParams.get("token") || ""));
+    }
+    if (route === "POST /api/auth/reset") {
+      const { token, password } = await readBody(req);
+      const rec = token && db.resets[token];
+      if (!rec || rec.exp < Date.now()) { if (rec) { delete db.resets[token]; persist(); } return send(res, 400, { error: "This reset link is invalid or has expired." }, origin); }
+      if (!password || String(password).length < 6) return send(res, 400, { error: "Password must be at least 6 characters." }, origin);
+      const u = db.users[rec.uid];
+      if (!u) { delete db.resets[token]; persist(); return send(res, 400, { error: "Account not found." }, origin); }
+      u.hash = hashPw(password);
+      delete db.resets[token];
+      persist();
+      sendEmail(u.email, "Your Pluck password was changed", emailLayout("Password changed",
+        `<p>Your Pluck password was just changed. If this was you, you're all set. If it wasn't, reset it again immediately and contact support.</p>`)).catch(() => {});
+      return send(res, 200, { ok: true }, origin);
+    }
+
+    /* ----- admin: broadcast an update email to all users ----- */
+    if (route === "POST /api/admin/broadcast") {
+      if (!ADMIN_TOKEN || req.headers["authorization"] !== "Bearer " + ADMIN_TOKEN) return send(res, 401, { error: "Unauthorized" }, origin);
+      const { subject, heading, body } = await readBody(req);
+      if (!subject || !body) return send(res, 400, { error: "subject and body are required" }, origin);
+      const recipients = Object.values(db.users).map((u) => u.email).filter(Boolean);
+      let sent = 0;
+      for (const to of recipients) { if (await sendEmail(to, subject, emailLayout(heading || subject, body))) sent++; }
+      return send(res, 200, { ok: true, recipients: recipients.length, sent }, origin);
     }
 
     /* ----- account (auth required) ----- */
@@ -206,10 +342,11 @@ const server = http.createServer(async (req, res) => {
     if (route === "POST /api/chat") {
       if (!ANTHROPIC_API_KEY) return send(res, 503, { error: "AI not configured on server." }, origin);
       const { model, max_tokens, system, messages } = await readBody(req);
+      const safeTokens = Math.min(Math.max(1, Number(max_tokens) || 700), 2000); // cap to control cost
       const r = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "content-type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: model || "claude-3-5-haiku-latest", max_tokens: max_tokens || 700, system, messages }),
+        body: JSON.stringify({ model: model || "claude-haiku-4-5-20251001", max_tokens: safeTokens, system, messages }),
       });
       const j = await r.json();
       return send(res, r.status, j, origin);
