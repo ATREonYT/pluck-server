@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: pluck-server
+    runtime: node
+    plan: free
+    buildCommand: echo "no build needed - zero dependencies"
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true        # Render makes a long random secret for you
+      - key: APPLE_CLIENT_ID
+        value: app.pluck.mobile     # change if your iOS bundle id is different
+      - key: ALLOWED_ORIGINS
+        value: capacitor://localhost,https://localhost,http://localhost
+      - key: REVENUECAT_WEBHOOK_AUTH
+        generateValue: true
+      - key: ADMIN_TOKEN
+        generateValue: true         # secret for sending broadcast/update emails
+      - key: APP_NAME
+        value: Pluck
+      # ---- Email (Brevo) — for welcome, password reset, sign-in alerts ----
+      - key: BREVO_API_KEY
+        sync: false                 # paste your Brevo API key in the Render dashboard
+      - key: BREVO_SENDER
+        sync: false                 # the verified "work email" address Brevo sends from
+      # Optional — only needed for LIVE AI conversations (not for accounts):
+      - key: ANTHROPIC_API_KEY
+        sync: false                 # you paste your own key in the Render dashboard
